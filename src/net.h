@@ -1,8 +1,10 @@
 #ifndef _NET_H_
 #define _NET_H_
 
-void dhcp(void);
+#include "header.h"
 
-void resolve_hostname(void);
+void hw_init_leds(void);
+
+void init_if(void);
 
 #endif

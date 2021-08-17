@@ -3,23 +3,20 @@
 #include <errno.h>
 #include <stdio.h>
 
-#include <net/net_if.h>
-#include <net/net_core.h>
-#include <net/net_context.h>
-#include <net/net_mgmt.h>
-
 #include <logging/log.h>
-LOG_MODULE_REGISTER(net_dhcpv4_client_sample, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-
+#include "header.h"
+#include "app.h"
 
 void main(void)
 {
-    LOG_INF("Starting [%d]", errno);
-    while (true)
-    {
-        k_sleep(K_MSEC(1000));
+    Application app = Application();
 
-        printk("UU");
+    app.init();
+    
+    while(1)
+    {
+        app.state_machine();
     }
 }
