@@ -1,14 +1,9 @@
 #include "header.h"
 
-#include "hw.h"
-#include "net.h"
-
-#include <net/net_core.h>
-#include <net/net_context.h>
-#include <net/http_client.h>
 #include <net/net_ip.h>
+#include <net/http_client.h>
 #include <net/dns_resolve.h>
-#include <net/socket.h>
+#include <data/json.h>
 
 #define HTTP_SERVER_PORT 8080
 
@@ -41,16 +36,30 @@ public:
 
 /*___________________________________________________________________________*/
 
-    const char * const m_server_hostname = "pcluc.local.lan";
-
-    struct in_addr m_server_ipaddr = { .s_addr = 0u };
-
-    uint8_t m_token[32];
-
     app_state m_state = undefined;
 
+    const char * const m_server_hostname = "pcluc.local.lan";
     int m_client_socket = -1;
+    struct in_addr m_server_ipaddr = { .s_addr = 0u };
 
+    uint32_t m_seed[4] = {};
+    uint8_t m_token[41] = {};   // sha1 is 40 byte long
+
+    char m_token_url[64];
+    struct http_request m_request;
+
+    static uint8_t m_tmp_buffer[256];
+
+    static uint8_t *m_buffer_cursor;
+    static uint8_t m_buffer[2048];
+
+/*___________________________________________________________________________*/
+
+    static void dns_result_cb(enum dns_resolve_status status, struct dns_addrinfo *info, void *user_data);
+
+    static int http_response_body_cb(struct http_parser *parser, const char *at, size_t length);
+    
+    static void http_response_cb(struct http_response *rsp, enum http_final_call final_data, void *user_data);
 
 /*___________________________________________________________________________*/
 
@@ -59,6 +68,12 @@ public:
     int resolve_server(const char * const hostname);
 
     int setup_socket(void);
+
+    void generate_seed(void);
+
+    void build_token_url(void);
+
+    void setup_http_request(const char *const url);
 
     int obtain_token(void);
 

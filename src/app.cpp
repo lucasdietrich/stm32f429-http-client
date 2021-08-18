@@ -1,11 +1,26 @@
 #include "app.h"
 
+#include <net/net_core.h>
+#include <net/net_context.h>
+#include <net/http_client.h>
+#include <net/socket.h>
+#include <random/rand32.h>
+
+#include "hw.h"
+#include "net.h"
+#include "app_utils.h"
+
 #include <logging/log.h>
 LOG_MODULE_REGISTER(app, LOG_LEVEL_DBG);
 
 /*___________________________________________________________________________*/
 
 Application * Application::p_instance;
+
+uint8_t Application::m_tmp_buffer[256];
+
+uint8_t *Application::m_buffer_cursor;
+uint8_t Application::m_buffer[2048];
 
 const static char *const app_state_str[] = {
     "undefined",
@@ -53,7 +68,6 @@ void Application::state_machine(void)
         if ((m_server_ipaddr.s_addr != 0) || (0 == resolve_server(m_server_hostname)))
         {
             m_state = server_connect;
-
         }
         break;
 
@@ -77,6 +91,8 @@ void Application::state_machine(void)
         break;
 
     case token_receive:
+        generate_seed();
+        build_token_url();
         if (0 == obtain_token())
         {
             m_state = connected;
@@ -84,10 +100,14 @@ void Application::state_machine(void)
         break;
 
     case connected: // ready
+
+        k_sleep(K_MSEC(10000)); // waiting
+
         m_state = disconnected;
         break;
 
     case disconnected:
+        reset();
         m_state = idle;
         break;
     
@@ -105,16 +125,22 @@ void Application::reset(void)
     if(m_client_socket >= 0)
     {
         close(m_client_socket);
+        m_client_socket = -1;
     }
 
-    memset(m_token, 0x00, sizeof(m_token));
-    // m_server_ipaddr.s_addr = 0u;
+    // don't reset token
+    // memset(m_token, 0x00, sizeof(m_token));
+    m_server_ipaddr.s_addr = 0u;
     m_state = idle;
 
-    _LOG_ERR("RESET");
+    _LOG_INF("RESET");
 }
 
 /*___________________________________________________________________________*/
+
+//
+// Socket
+//
 
 int Application::setup_socket(void)
 {
@@ -131,18 +157,14 @@ int Application::setup_socket(void)
             .sin_addr = m_server_ipaddr
         };
 
-        // set secure
+        // TODO set secure
 
         ret = connect(m_client_socket, (const sockaddr *) &addr, sizeof(struct sockaddr_in));
 
         if (ret != 0)
         {
-            _LOG_ERR("failed to connect to server");
+            LOG_ERR("failed to connect to server ret=%d", ret);
         }
-
-        close(m_client_socket);
-
-        reset();
     }
     else
     {
@@ -151,14 +173,149 @@ int Application::setup_socket(void)
     return ret;
 }
 
+/*___________________________________________________________________________*/
+
+//
+// Token
+//
+
+void Application::generate_seed(void)
+{
+    // we generate a random hexadecimal number that will be send to the provisionning server
+    sys_rand_get(m_seed, sizeof(m_seed));
+}
+
+void Application::build_token_url(void)
+{
+    strcpy(m_token_url, "/getToken?Seed=258e3f3bd8a4a54aabcf5ef6723effdd");
+    // char * end = m_token_url + sizeof(GETTOKEN_URL) - 1u;
+    // for (uint_fast8_t i = 0; i < sizeof(m_seed); i++)
+    // {
+    //     if (u32_to_hex(m_seed[i], end, 8u) != 0)
+    //     {
+    //         break;
+    //     }
+    //     end += 8u;
+    // }
+    // *end = '\0';
+}
+
+static const struct http_parser_settings http_settings_cb = {
+    .on_body = Application::http_response_body_cb
+};
+
+void Application::setup_http_request(const char *const url)
+{
+    memset(&m_request, 0x00, sizeof(struct http_request));
+    
+    static const char * headers[] = {
+        "Connection: close",
+        NULL
+    };
+    m_request.method = http_method::HTTP_GET;
+    m_request.response = http_response_cb;
+    m_request.http_cb = &http_settings_cb;
+    m_request.recv_buf = m_tmp_buffer;
+    m_request.recv_buf_len = sizeof(m_tmp_buffer);
+    m_request.url = url;
+    m_request.protocol = "HTTP/1.1";
+    // m_request.header_fields = headers;
+
+    // can be ignored ?
+    m_request.host = m_server_hostname;
+    m_request.port = "8080";
+}
+
+int Application::http_response_body_cb(struct http_parser *parser, const char *at, size_t length)
+{
+    if (m_buffer_cursor - m_buffer < (int) sizeof(m_buffer))
+    {
+        memcpy(m_buffer_cursor, at, length);
+        m_buffer_cursor += length;
+    }
+    return 0;
+}
+
+struct http_token_response {
+    const char * datetime;
+    uint32_t timestamp;
+    const char * seed;
+    const char * salt;
+    const char * token;
+};
+
+static const struct json_obj_descr http_token_response_desrc[] = {
+    JSON_OBJ_DESCR_PRIM_NAMED(struct http_token_response, "Datetime", datetime, JSON_TOK_STRING),
+    JSON_OBJ_DESCR_PRIM_NAMED(struct http_token_response, "Timestamp", timestamp, JSON_TOK_NUMBER),
+    JSON_OBJ_DESCR_PRIM_NAMED(struct http_token_response, "Seed", seed, JSON_TOK_STRING),
+    JSON_OBJ_DESCR_PRIM_NAMED(struct http_token_response, "Salt", salt, JSON_TOK_STRING),
+    JSON_OBJ_DESCR_PRIM_NAMED(struct http_token_response, "Token", token, JSON_TOK_STRING),
+};
+
+void Application::http_response_cb(struct http_response *rsp, enum http_final_call final_data, void *user_data)
+{
+    if (final_data == HTTP_DATA_FINAL)
+    {
+        LOG_HEXDUMP_DBG(m_buffer, (size_t) (m_buffer_cursor - m_buffer), "");
+
+        struct http_token_response data;
+
+        int ret = json_obj_parse((char*) m_buffer, (size_t)(m_buffer_cursor - m_buffer), http_token_response_desrc,
+                                 ARRAY_SIZE(http_token_response_desrc), &data);
+        if (ret >= 0)
+        {
+            if (JSON_PARAM_FILLED(ret, 2))  // seed
+            {
+                // check seed
+            }
+
+            if (JSON_PARAM_FILLED(ret, 4))  // token
+            {
+                if (strlen(data.token) < sizeof(Application::m_token))
+                {
+                    strcpy((char *) p_instance->m_token, data.token);
+
+                    // provisionning finished
+                    p_instance->m_state = connected;
+                }
+                else
+                {
+                    _LOG_ERR("Token has invalid size");
+                }
+            }
+            else
+            {
+                _LOG_ERR("Token not in response");
+            }
+        }
+        else
+        {
+            _LOG_ERR("Invalid JSON response");
+        }
+    }
+}
+
 int Application::obtain_token(void)
 {
-    return 0;
+    int ret = 0;
+
+    LOG_DBG("m_seed=%s", log_strdup(m_token_url));
+
+    setup_http_request(m_token_url);
+
+    m_buffer_cursor = m_buffer;
+    ret = http_client_req(m_client_socket, &m_request, 10000, nullptr); // &m_state
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to obtain token ret=%d", ret);
+    }
+    _LOG_INF("obtain_token finished");
+    return ret;
 }
 
 /*___________________________________________________________________________*/
 
-static void dns_result_cb(enum dns_resolve_status status, struct dns_addrinfo *info, void *user_data)
+void Application::dns_result_cb(enum dns_resolve_status status, struct dns_addrinfo *info, void *user_data)
 {
 	char hr_addr[NET_IPV4_ADDR_LEN];
 	void *addr;
@@ -198,7 +355,7 @@ static void dns_result_cb(enum dns_resolve_status status, struct dns_addrinfo *i
 		log_strdup(net_addr_ntop(info->ai_family, addr,
 					 hr_addr, sizeof(hr_addr))));
 
-    memcpy(&Application::get_instance()->m_server_ipaddr, addr, sizeof(sockaddr_in::sin_addr));
+    memcpy(&p_instance->m_server_ipaddr, addr, sizeof(sockaddr_in::sin_addr));
     
     k_poll_signal_raise(&signal, 1);
 }
