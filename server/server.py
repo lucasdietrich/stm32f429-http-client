@@ -6,6 +6,7 @@ import random
 from hashlib import sha1
 from typing import List, Union, Dict
 
+
 class JsonResponse(web.Response):
     def __init__(self, json_data: Union[Dict, List], status: int = 200):
         super(JsonResponse, self).__init__(
@@ -15,6 +16,7 @@ class JsonResponse(web.Response):
             },
             status=status,
         )
+
 
 class Server(web.Application):
     # https://regex101.com/r/cLMEBd/1
@@ -64,6 +66,7 @@ class Server(web.Application):
         text = request.url.human_repr() + " : Hello " + name
         print(text)
         return web.Response(text=text)
+
 
 if __name__ == '__main__':
     web.run_app(Server(), port=8080)

@@ -25,10 +25,11 @@ uint8_t Application::m_buffer[2048];
 const static char *const app_state_str[] = {
     "undefined",
     "idle",
-    "server_resolved",
-    "token_received",
+    "server_resolve",
+    "token_receive",
+    "server_connect",
     "connected",
-    "disconnected"
+    "disconnecting"
 };
 
 const char *const Application::get_app_state_str(app_state state)
@@ -56,32 +57,23 @@ void Application::init(void)
 
 void Application::state_machine(void)
 {
-    LOG_INF("state_machine state: %s", get_app_state_str(m_state));
-
     switch (m_state)
     {
     case idle:
-        m_state = server_resolve;
+        set_state(server_resolve);
         break;
 
     case server_resolve:
         if ((m_server_ipaddr.s_addr != 0) || (0 == resolve_server(m_server_hostname)))
         {
-            m_state = server_connect;
+            set_state(server_connect);
         }
         break;
 
     case server_connect:
         if (setup_socket() >= 0)
         {
-            if (registered())
-            {
-                m_state = connected;
-            }
-            else
-            {
-                m_state = token_receive;
-            }            
+            set_state(is_registered() ? connected : token_receive);       
         }
         else
         {
@@ -95,32 +87,36 @@ void Application::state_machine(void)
         build_token_url();
         if (0 == obtain_token())
         {
-            m_state = connected;
+            set_state(connected);
         }
         break;
 
-    case connected: // ready
-
-        k_sleep(K_MSEC(10000)); // waiting
-
-        m_state = disconnected;
+    case connected:
+        k_sleep(K_MSEC(10000));
+        set_state(disconnecting);
         break;
 
-    case disconnected:
+    case disconnecting:
         reset();
-        m_state = idle;
         break;
     
     default:
         _LOG_ERR("undefined state");
     }
+}
 
-    k_sleep(K_MSEC(5000));
+void Application::set_state(enum app_state new_state)
+{
+    if (new_state != m_state)
+    {
+        LOG_INF("[%s > %s]", log_strdup(get_app_state_str(m_state)), log_strdup(get_app_state_str(new_state)));
+        m_state = new_state;
+    }
 }
 
 /*___________________________________________________________________________*/
 
-void Application::reset(void)
+void Application::reset(bool force_provisionning)
 {
     if(m_client_socket >= 0)
     {
@@ -128,10 +124,16 @@ void Application::reset(void)
         m_client_socket = -1;
     }
 
-    // don't reset token
+    // don't reset token and ip
     // memset(m_token, 0x00, sizeof(m_token));
-    m_server_ipaddr.s_addr = 0u;
-    m_state = idle;
+    // m_server_ipaddr.s_addr = 0u;
+
+    if (force_provisionning)
+    {
+        memset(m_token, 0x00, sizeof(m_token));
+    }
+
+    set_state(idle);
 
     _LOG_INF("RESET");
 }
@@ -187,17 +189,14 @@ void Application::generate_seed(void)
 
 void Application::build_token_url(void)
 {
-    strcpy(m_token_url, "/getToken?Seed=258e3f3bd8a4a54aabcf5ef6723effdd");
-    // char * end = m_token_url + sizeof(GETTOKEN_URL) - 1u;
-    // for (uint_fast8_t i = 0; i < sizeof(m_seed); i++)
-    // {
-    //     if (u32_to_hex(m_seed[i], end, 8u) != 0)
-    //     {
-    //         break;
-    //     }
-    //     end += 8u;
-    // }
-    // *end = '\0';
+    strcpy(m_get_token_url, URL_GET_TOKEN);
+
+    int ret = tohex(m_get_token_url + sizeof(URL_GET_TOKEN) - 1, sizeof(SEED), (uint8_t*) m_seed, sizeof(m_seed));
+    m_get_token_url[URL_GET_TOKEN_SIZE - 1] = '\0';
+
+    __ASSERT(ret > 0, "seed HEX encoding should never fail err=%d", ret);
+
+    LOG_DBG("provisionning url: %s", log_strdup(m_get_token_url));
 }
 
 static const struct http_parser_settings http_settings_cb = {
@@ -209,9 +208,10 @@ void Application::setup_http_request(const char *const url)
     memset(&m_request, 0x00, sizeof(struct http_request));
     
     static const char * headers[] = {
-        "Connection: close",
+        "Connection: close\r\n",
         NULL
     };
+
     m_request.method = http_method::HTTP_GET;
     m_request.response = http_response_cb;
     m_request.http_cb = &http_settings_cb;
@@ -219,7 +219,7 @@ void Application::setup_http_request(const char *const url)
     m_request.recv_buf_len = sizeof(m_tmp_buffer);
     m_request.url = url;
     m_request.protocol = "HTTP/1.1";
-    // m_request.header_fields = headers;
+    // m_request.header_fields = headers; // settings Connection: Close error cause a bug
 
     // can be ignored ?
     m_request.host = m_server_hostname;
@@ -276,7 +276,7 @@ void Application::http_response_cb(struct http_response *rsp, enum http_final_ca
                     strcpy((char *) p_instance->m_token, data.token);
 
                     // provisionning finished
-                    p_instance->m_state = connected;
+                    p_instance->set_state(connected);
                 }
                 else
                 {
@@ -299,9 +299,9 @@ int Application::obtain_token(void)
 {
     int ret = 0;
 
-    LOG_DBG("m_seed=%s", log_strdup(m_token_url));
+    LOG_DBG("m_seed=%s", log_strdup(m_get_token_url));
 
-    setup_http_request(m_token_url);
+    setup_http_request(m_get_token_url);
 
     m_buffer_cursor = m_buffer;
     ret = http_client_req(m_client_socket, &m_request, 10000, nullptr); // &m_state
@@ -309,7 +309,7 @@ int Application::obtain_token(void)
     {
         LOG_ERR("Failed to obtain token ret=%d", ret);
     }
-    _LOG_INF("obtain_token finished");
+    LOG_INF("Token: %s", log_strdup(m_token));
     return ret;
 }
 
@@ -388,7 +388,7 @@ int Application::resolve_server(const char * const hostname)
     return ret;
 }
 
-bool Application::registered(void)
+bool Application::is_registered(void)
 {
     bool registered = false;
     for (uint_fast8_t i = 0; i < sizeof(m_token); i++)

@@ -6,9 +6,9 @@
 
 #include <errno.h>
 
-int u32_to_hex(uint32_t number, char * const output, size_t len);
+int tohex(char * dest, size_t len, uint8_t * buf, size_t buf_len);
 
-int hex_to_u8_buf(char * const input, uint8_t* buffer, size_t len);
+int fromhex(uint8_t * buf, size_t buf_len, char * input, size_t len);
 
 
 #endif

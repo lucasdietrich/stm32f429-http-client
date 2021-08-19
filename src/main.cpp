@@ -18,5 +18,7 @@ void main(void)
     while(1)
     {
         app.state_machine();
+
+        k_sleep(K_MSEC(2000));
     }
 }
